@@ -5,7 +5,7 @@ import {Construct} from "constructs";
 import {join} from "path";
 import {MigrationServiceCore} from "./migration-service-core";
 import {StringParameter} from "aws-cdk-lib/aws-ssm";
-import {Effect, PolicyStatement} from "aws-cdk-lib/aws-iam";
+import {Effect, PolicyStatement, Role, ServicePrincipal} from "aws-cdk-lib/aws-iam";
 import {
     createMSKConsumerIAMPolicies,
     createOpenSearchIAMAccessPolicy,
@@ -54,10 +54,11 @@ export class MigrationConsoleStack extends MigrationServiceCore {
 
     constructor(scope: Construct, id: string, props: MigrationConsoleProps) {
         super(scope, id, props)
+        const domainAccessGroupId = StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/osAccessSecurityGroupId`)
         let securityGroups = [
             SecurityGroup.fromSecurityGroupId(this, "serviceConnectSG", StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/serviceConnectSecurityGroupId`)),
             SecurityGroup.fromSecurityGroupId(this, "trafficStreamSourceAccessSG", StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/trafficStreamSourceAccessSecurityGroupId`)),
-            SecurityGroup.fromSecurityGroupId(this, "defaultDomainAccessSG", StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/osAccessSecurityGroupId`)),
+            SecurityGroup.fromSecurityGroupId(this, "defaultDomainAccessSG", domainAccessGroupId),
             SecurityGroup.fromSecurityGroupId(this, "replayerOutputAccessSG", StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/replayerOutputAccessSecurityGroupId`))
         ]
         if (props.migrationAnalyticsEnabled) {
@@ -112,6 +113,18 @@ export class MigrationConsoleStack extends MigrationServiceCore {
         }
         if (props.fetchMigrationEnabled) {
             environment["FETCH_MIGRATION_COMMAND"] = StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/fetchMigrationCommand`)
+            // [POC] Add a pipeline role for OSIS
+            const osisPipelineRole = new Role(this, 'osisPipelineRole', {
+                assumedBy: new ServicePrincipal('osis-pipelines.amazonaws.com'),
+                description: 'OSIS Pipeline role for Fetch Migration'
+            });
+            // Add policy to allow access to Opensearch domains
+            osisPipelineRole.addToPolicy(new PolicyStatement({
+                effect: Effect.ALLOW,
+                actions: ["es:DescribeDomain", "es:ESHttp*"],
+                resources: [`arn:aws:es:${props.env?.region}:${props.env?.account}:domain/*`]
+            }))
+            environment["OSIS_PIPELINE_ROLE_ARN"] = osisPipelineRole.roleArn
 
             const fetchMigrationTaskDefArn = StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/fetchMigrationTaskDefArn`);
             const fetchMigrationTaskRunPolicy = new PolicyStatement({
@@ -124,15 +137,41 @@ export class MigrationConsoleStack extends MigrationServiceCore {
             const fetchMigrationTaskRoleArn = StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/fetchMigrationTaskRoleArn`);
             const fetchMigrationTaskExecRoleArn = StringParameter.valueForStringParameter(this, `/migration/${props.stage}/${props.defaultDeployId}/fetchMigrationTaskExecRoleArn`);
             // Required as per https://docs.aws.amazon.com/AmazonECS/latest/userguide/task-iam-roles.html
+            // [POC] Allow passing of pipeline role
             const fetchMigrationPassRolePolicy = new PolicyStatement({
                 effect: Effect.ALLOW,
-                resources: [fetchMigrationTaskRoleArn, fetchMigrationTaskExecRoleArn],
+                resources: [fetchMigrationTaskRoleArn, fetchMigrationTaskExecRoleArn, osisPipelineRole.roleArn],
                 actions: [
                     "iam:PassRole"
                 ]
             })
             servicePolicies.push(fetchMigrationTaskRunPolicy)
             servicePolicies.push(fetchMigrationPassRolePolicy)
+
+            // [POC] Enable Migration Console to fetch pipeline from Secrets Manager
+            const osiMigrationGetSecretPolicy = new PolicyStatement({
+                effect: Effect.ALLOW,
+                resources: [`arn:aws:secretsmanager:${props.env?.region}:${props.env?.account}:secret:${props.stage}-${props.defaultDeployId}-fetch-migration-pipelineConfig-*`],
+                actions: [
+                    "secretsmanager:GetSecretValue"
+                ]
+            })
+
+            // [POC] Enable OSIS management from Migration Console
+            const osisManagementPolicy = new PolicyStatement({
+                effect: Effect.ALLOW,
+                resources: ["*"],
+                actions: [
+                    "osis:*"
+                ]
+            })
+            servicePolicies.push(fetchMigrationTaskRunPolicy)
+            servicePolicies.push(fetchMigrationPassRolePolicy)
+            servicePolicies.push(osiMigrationGetSecretPolicy)
+            servicePolicies.push(osisManagementPolicy)
+
+            // [POC] Add VPC options to environment
+            environment["OSIS_PIPELINE_VPC_OPTIONS"] = `SubnetIds=${props.vpc.privateSubnets.map(_ => _.subnetId).join(",")},SecurityGroupIds=${domainAccessGroupId}`
         }
 
         this.createService({

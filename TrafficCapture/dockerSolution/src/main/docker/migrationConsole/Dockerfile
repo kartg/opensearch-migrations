@@ -14,12 +14,18 @@ COPY humanReadableLogs.py /root/
 COPY catIndices.sh /root/
 COPY showFetchMigrationCommand.sh /root/
 COPY setupIntegTests.sh /root/
+COPY runOSIHistoricalDataMigration.sh /root/
 COPY msk-iam-auth.properties /root/kafka-tools/aws
 COPY kafkaCmdRef.md /root/kafka-tools
 RUN chmod ug+x /root/runTestBenchmarks.sh
 RUN chmod ug+x /root/humanReadableLogs.py
 RUN chmod ug+x /root/catIndices.sh
 RUN chmod ug+x /root/showFetchMigrationCommand.sh
+RUN chmod ug+x /root/runOSIHistoricalDataMigration.sh
+COPY python/ /root/python/
+# TODO - Installing here messes with OSB's botocore
+#WORKDIR /root/python
+#RUN pip3 install --user -r requirements.txt
 WORKDIR /root/kafka-tools
 # Get kafka distribution and unpack to 'kafka'
 RUN wget -qO- https://archive.apache.org/dist/kafka/3.6.0/kafka_2.13-3.6.0.tgz | tar --transform 's!^[^/]*!kafka!' -xvz
